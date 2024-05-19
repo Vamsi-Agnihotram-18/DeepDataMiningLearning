@@ -77,22 +77,32 @@ class myEvaluator:
         elif self.useHFevaluator:
             # Load the accuracy metric from the datasets package
             self.HFmetric = evaluate.load(self.metricname, cache_dir=mycache_dir) #evaluate.load("mse")
-            
+
 
     # Define our compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with
     # `predictions` and `label_ids` fields) and has to return a dictionary string to float.
     #eval_pred is EvalPrediction type
-    def compute_metrics(self, eval_pred): #: EvalPrediction):
-        #preds = eval_pred.predictions[0] if isinstance(eval_pred.predictions, tuple) else eval_pred.predictions #(1000, 593, 46)
+    from sklearn.metrics import precision_recall_fscore_support
+
+    def compute_metrics(self, eval_pred):
         preds, labels = eval_pred
         if self.metricname == "accuracy":
-            """Computes accuracy on a batch of predictions"""
             preds = np.argmax(preds, axis=1)
-            #return self.HFmetric.compute(predictions=predictions, references=labels)
         elif self.metricname == "mse":
             preds = np.squeeze(preds)
-            #return self.HFmetric.compute(predictions=preds, references=label_ids)
-        return self.compute(predictions=preds, references=labels)
+
+        # Compute precision and recall
+        precision, recall, _, _ = precision_recall_fscore_support(labels, preds, average='macro')
+
+        # You can integrate these metrics into the returned results
+        metrics_result = self.compute(predictions=preds, references=labels)
+        metrics_result.update({
+            "precision": precision,
+            "recall": recall
+        })
+
+        return metrics_result
+
 
     def mycompute(self, predictions=None, references=None):
         predictions = np.array(predictions)
@@ -105,13 +115,13 @@ class myEvaluator:
             eval_result = ((predictions - references) ** 2).mean().item()
         results = {self.metricname: eval_result}
         return results
-    
+
     def compute(self, predictions=None, references=None):
         results = {}
         if predictions is not None and references is not None:
             if self.useHFevaluator:
                 results = self.HFmetric.compute(predictions=predictions, references=references)
-            else: 
+            else:
                 results = self.mycompute(predictions=predictions, references=references)
             #print("HF evaluator:", results)
             if not isinstance(results, dict):
@@ -120,7 +130,7 @@ class myEvaluator:
         else: #evaluate the whole dataset
             if self.useHFevaluator:
                 results = self.HFmetric.compute()
-                print("HF evaluator result1:", results)#iou_bbox 
+                print("HF evaluator result1:", results)#iou_bbox
                 #results2 = self.HFmetric.compute(predictions=self.preds, references=self.refs) #the same results
                 #print("HF evaluator result2:", results2)
                 if not isinstance(results, dict):
@@ -133,7 +143,7 @@ class myEvaluator:
         if self.task == "object-detection":
             results = results['iou_bbox']
         return results
-    
+
     def add_batch(self, predictions, references):
         if self.useHFevaluator == True:
             if self.task=="object-detection":
@@ -166,7 +176,7 @@ def pushtohub(hub_model_id, output_dir, hub_token):
             gitignore.write("epoch_*\n")
 
 valkey='test' #"validation"
-#data_name list: food101, 
+#data_name list: food101,
 def load_visiondataset(data_name=None, split="train", train_dir=None, validation_dir=None, task="image-classification", format='coco', max_train_samples = 2000, train_val_split=0.15, \
                        image_column_name='image', label_column_name='labels', mycache_dir=None):
     if data_name is not None:
@@ -209,7 +219,7 @@ def load_visiondataset(data_name=None, split="train", train_dir=None, validation
         split_datasets["train"] = raw_datasets
         split_datasets = split_datasets["train"].train_test_split(test_size=train_val_split, seed=20) #get splits
         if valkey!="test":
-            # rename the "test" key to "validation" 
+            # rename the "test" key to "validation"
             split_datasets[valkey] = split_datasets.pop("test")
 
     #limit the dataset size
@@ -217,10 +227,10 @@ def load_visiondataset(data_name=None, split="train", train_dir=None, validation
         split_datasets['train'] = split_datasets['train'].select([i for i in list(range(max_train_samples))])
         Val_SAMPLES = int(max_train_samples*train_val_split)
         split_datasets[valkey] = split_datasets[valkey].select([i for i in list(range(Val_SAMPLES))])
-    
+
     dataset_column_names = split_datasets["train"].column_names if "train" in split_datasets else split_datasets[valkey].column_names
     #'image': PIL image object, 'labels': int, 'image_file_path': path
-    
+
     if task == "object-detection":
         image_column_name = "image"
         label_column_name = "objects" #for object detection
@@ -228,6 +238,15 @@ def load_visiondataset(data_name=None, split="train", train_dir=None, validation
         # keep = [i for i in range(len(split_datasets["train"])) if i not in remove_idx]
         # split_datasets["train"] = split_datasets["train"].select(keep)
     elif task == "image-classification":
+      train_transforms = Compose([
+        RandomResizedCrop(size),
+        RandomHorizontalFlip(),
+        RandomRotation(degrees=15),  # Increased rotation angle
+        ColorJitter(brightness=0.5, contrast=0.6, saturation=0.4, hue=0.3),  # Enhanced color jittering
+        GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0)),  # Adding Gaussian Blur
+        ToTensor(),
+        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
         #some datset the labels name is different
         if data_name == "food101": #https://huggingface.co/datasets/food101
             image_column_name = "image"
@@ -248,7 +267,7 @@ def load_visiondataset(data_name=None, split="train", train_dir=None, validation
             "Make sure to set `--label_column_name` to the correct text column - one of "
             f"{', '.join(dataset_column_names)}."
         )
-    
+
     # Prepare label mappings.
     # We'll include these in the model's config to get human readable labels in the Inference API.
     #By default the ClassLabel fields are encoded into integers
@@ -274,14 +293,14 @@ def load_visiondataset(data_name=None, split="train", train_dir=None, validation
                                        image_column_name=image_column_name, label_column_name=label_column_name, output_folder="output/")
 
 
-    #The Datasets library is made for processing data very easily. We can write custom functions, 
+    #The Datasets library is made for processing data very easily. We can write custom functions,
     #which can then be applied on an entire dataset (either using .map() or .set_transform()).
     return split_datasets, labels, id2label, image_column_name, label_column_name
 
 
 def dataset_objectdetection_select(dataset, data_index, id2label, categories, format='coco', image_column_name='image', label_column_name='objects', output_folder="output/"):
-    image = dataset[data_index][image_column_name]#PIL image in RGB mode 
-    annotations = dataset[data_index][label_column_name] 
+    image = dataset[data_index][image_column_name]#PIL image in RGB mode
+    annotations = dataset[data_index][label_column_name]
     #['id'] ['area'] ['bbox'](4,4)list ['category']
     #in coco format https://albumentations.ai/docs/getting_started/bounding_boxes_augmentation/#coco
     #bounding box in [x_min, y_min, width, height]
@@ -375,7 +394,7 @@ def dataset_preprocessing(image_processor, task, size, format='coco', image_colu
             ]
             del example_batch[image_column_name]
             return example_batch
-    
+
     elif task =="object-detection":
         if not isinstance(size, tuple):
             size = (size, size)
@@ -393,7 +412,7 @@ def dataset_preprocessing(image_processor, task, size, format='coco', image_colu
             ],
             bbox_params=albumentations.BboxParams(format=format, min_area=1024, min_visibility=0.1, label_fields=["category"]),
         )
-        #The image_processor expects the annotations to be in the following format: {'image_id': int, 'annotations': List[Dict]}, 
+        #The image_processor expects the annotations to be in the following format: {'image_id': int, 'annotations': List[Dict]},
         #where each dictionary is a COCO object annotation.
         # transforming a batch
         def preprocess_train(examples):#can handle batch
@@ -406,13 +425,13 @@ def dataset_preprocessing(image_processor, task, size, format='coco', image_colu
                 #     bbox_new = convert_bbbox2coco(objects["bbox"], source_format=format) #[x_min, y_min, width, height]
                 # else:
                 #     bbox_new = objects["bbox"]
-                
+
                 bbox_new = objects["bbox"]
                 newbbox, errbox = check_boxsize(bbox_new, height=height, width=width, format=format)
                 if errbox:
                     print(bbox_new)
                 out = train_transforms(image=image, bboxes=newbbox, category=objects["category"])#already consider format bbox size changed
-                
+
                 area.append(objects["area"])
                 images.append(out[image_column_name]) #(480, 480, 3)
                 bboxes.append(out["bboxes"])#resized [x_min, y_min, width, height]
@@ -428,7 +447,7 @@ def dataset_preprocessing(image_processor, task, size, format='coco', image_colu
             #do_convert_annotations: Converts the bounding boxes from the format (top_left_x, top_left_y, width, height) to (center_x, center_y, width, height) and in relative coordinates.
             #input_data_format: "channels_first" CHW, "channels_last" HWC
             #If unset, the channel dimension format is inferred from the input image.
-        
+
         def preprocess_val(examples):#can handle batch
             image_ids = examples["image_id"]
             images, bboxes, area, categories = [], [], [], []
@@ -447,7 +466,7 @@ def dataset_preprocessing(image_processor, task, size, format='coco', image_colu
             ]#list of dict 'image_id'=756, 'annotations': list of dicts with 'area' 'bbox' 'category_id'
             #https://huggingface.co/docs/transformers/main/en/model_doc/detr#transformers.DetrImageProcessor
             return image_processor(images=images, annotations=targets, return_tensors="pt")
-        
+
     return preprocess_train, preprocess_val
 
 
@@ -459,11 +478,11 @@ def get_collate_fn(task, image_processor, label_column_name=None):
             pixel_values = torch.stack([example["pixel_values"] for example in examples])
             labels = torch.tensor([example[label_column_name] for example in examples])
             return {"pixel_values": pixel_values, "labels": labels}
-        #similar to 
+        #similar to
         #collate_fn = DefaultDataCollator()
         return collate_fn
     elif task == "object-detection":
-        # batch images together. Pad images (which are now pixel_values) to the largest image in a batch, 
+        # batch images together. Pad images (which are now pixel_values) to the largest image in a batch,
         #and create a corresponding pixel_mask to indicate which pixels are real (1) and which are padding (0).
         def object_detection_collate_fn(batch):#batch is a list input
             pixel_values = [item["pixel_values"] for item in batch] #list of [3,800,800]
@@ -496,7 +515,7 @@ def load_visionmodel(model_name_or_path, task="image-classification", load_only=
             num_labels=len(labels),
             i2label=id2label,
             label2id=label2id,
-            cache_dir=mycache_dir,  
+            cache_dir=mycache_dir,
             finetuning_task=task, #"image-classification",
             trust_remote_code=trust_remote_code,
         )
@@ -507,16 +526,18 @@ def load_visionmodel(model_name_or_path, task="image-classification", load_only=
         trust_remote_code=trust_remote_code,
     )
     if task == "image-classification":
-        model = AutoModelForImageClassification.from_pretrained(
-            model_name_or_path,
-            config=config,
-            cache_dir=mycache_dir,
-            ignore_mismatched_sizes=ignore_mismatched_sizes,
-            trust_remote_code=trust_remote_code,
-        )
+    # Replace 'model_name_or_path' with the identifier for the ResNet-101 model available on Hugging Face
+    model_name_or_path = "google/big_transfer_resnet101"  # This is a placeholder, replace with actual model path if different
+    model = AutoModelForImageClassification.from_pretrained(
+        model_name_or_path,
+        config=config,
+        cache_dir=mycache_dir,
+        ignore_mismatched_sizes=ignore_mismatched_sizes,
+        trust_remote_code=trust_remote_code,
+    )
     elif task == "depth-estimation":
         model = AutoModelForDepthEstimation.from_pretrained(
-            model_name_or_path, 
+            model_name_or_path,
             config=config,
             cache_dir=mycache_dir,
             ignore_mismatched_sizes=ignore_mismatched_sizes,
@@ -524,7 +545,7 @@ def load_visionmodel(model_name_or_path, task="image-classification", load_only=
         )
     elif task == "object-detection":
         model = AutoModelForObjectDetection.from_pretrained(
-            model_name_or_path, 
+            model_name_or_path,
             config=config,
             cache_dir=mycache_dir,
             ignore_mismatched_sizes=ignore_mismatched_sizes,
@@ -682,7 +703,7 @@ def custom_train(args, model, image_processor, train_dataloader, eval_dataloader
 
         if do_evaluate:
             eval_metric = evaluate_dataset(model, eval_dataloader, args.task, metriceval, device, image_processor=image_processor, accelerator=accelerator)
-    
+
             # model.eval()
             # for step, batch in enumerate(eval_dataloader):
             #     with torch.no_grad():
@@ -791,7 +812,7 @@ def trainmain():
         print("Cache dir:", mycache_dir)
         device, args.useamp = get_device(gpuid=args.gpuid, useamp=args.useamp)
         saveargs2file(args, trainoutput)
-    
+
     #waits for all processes to finish before continuing
     accelerator.wait_for_everyone()
 
@@ -815,7 +836,7 @@ def trainmain():
         size = image_processor.size["shortest_edge"]
     else:
         size = (image_processor.size["height"], image_processor.size["width"]) #(224, 224)
-    
+
     with accelerator.main_process_first():
         preprocess_train, preprocess_val = dataset_preprocessing(image_processor=image_processor, task=args.task, size=size, format=args.format, image_column_name=args.image_column_name, label_column_name=args.label_column_name)
         #The transforms are applied on the fly when you load an element of the dataset:
@@ -841,7 +862,7 @@ def trainmain():
     metriceval = myEvaluator(task=args.task, useHFevaluator=True, dualevaluator=False, \
                             processor=image_processor, coco=coco, mycache_dir=mycache_dir)
 
-    
+
     # using now() to get current time
     starting_time = datetime.datetime.now()
     #['HFTrainer','CustomTrain', 'NoTrain']
@@ -904,7 +925,7 @@ def trainmain():
             custom_train(args, model, image_processor, train_dataloader, eval_dataloader, metriceval, device, accelerator, do_evaluate=False)
         else:
             evaluate_dataset(model, eval_dataloader, args.task, metriceval, device, image_processor=image_processor, accelerator=accelerator)
-    
+
 
     # using now() to get current time
     current_time = datetime.datetime.now()
@@ -916,7 +937,7 @@ def trainmain():
     print("Finished")
 
 def evaluate_dataset(model, val_dataloader, task, metriceval, device, image_processor=None, accelerator=None):
-    
+
     model = model.eval().to(device)
     for step, batch in enumerate(tqdm(val_dataloader)):
         pixel_values = batch["pixel_values"].to(device)#[8, 3, 840, 1333]
@@ -924,11 +945,11 @@ def evaluate_dataset(model, val_dataloader, task, metriceval, device, image_proc
         #batch = {k: v.to(device) for k, v in batch.items()}
         #"pixel_values" [8, 3, 840, 1333]
         #"pixel_mask" [8, 840, 1333]
-        # "labels" 
+        # "labels"
         with torch.no_grad():
             #outputs = model(**batch)
             outputs = model(pixel_values=pixel_values, pixel_mask=pixel_mask) #DetrObjectDetectionOutput
-        
+
         if task == "image-classification":
             predictions = outputs.logits.argmax(dim=-1)
             if accelerator is not None:
@@ -941,10 +962,10 @@ def evaluate_dataset(model, val_dataloader, task, metriceval, device, image_proc
             ]  #resized + normalized, list of dicts ['size', 'image_id', 'boxes'[8,4], 'class_labels', 'area', 'orig_size'[size[2]]]
             orig_target_sizes = torch.stack([target["orig_size"] for target in references], dim=0) #[8,2] shape
             # convert outputs of model to COCO api, list of dicts
-            predictions = image_processor.post_process_object_detection(outputs,  threshold=0.0, target_sizes=orig_target_sizes) 
+            predictions = image_processor.post_process_object_detection(outputs,  threshold=0.0, target_sizes=orig_target_sizes)
             #list of dicts ['scores', 'labels'[100], 'boxes'(100,4)]
-            
-            id2label = model.config.id2label 
+
+            id2label = model.config.id2label
             #print(batch["labels"][0].keys()) #['size', 'image_id', 'class_labels', 'boxes', 'area', 'iscrowd', 'orig_size']
             image = pixel_values2img(pixel_values)
             pred_boxes = outputs['pred_boxes'].cpu().squeeze(dim=0).numpy() #(100,4) normalized (center_x, center_y, width, height)
@@ -954,7 +975,7 @@ def evaluate_dataset(model, val_dataloader, task, metriceval, device, image_proc
             labels = labels.cpu().squeeze(dim=0).numpy() #(100,)
             draw_objectdetection_predboxes(image.copy(), pred_boxes, scores, labels, id2label) #DetrObjectDetectionOutput
             #print(batch["labels"])#list of dicts
-            
+
             #the image size is the not correct
             draw_objectdetection_results(image, predictions[0], id2label)
         metriceval.add_batch(
@@ -1003,7 +1024,7 @@ def parse_args():
                     help='dataset split name in huggingface dataset')
     parser.add_argument('--datatype', type=str, default='huggingface',
                     help='Data type: huggingface, torch')
-    #format #"coco": [x_min, y_min, width, height] in pixels 
+    #format #"coco": [x_min, y_min, width, height] in pixels
     #pascal_voc: [x_min, y_min, x_max, y_max] in pixels
     #albumentations  [x_min, y_min, x_max, y_max] normalized
     #yolo: [x_center, y_center, width, height] normalized
@@ -1159,7 +1180,7 @@ if __name__ == "__main__":
     trainmain()
 
 r"""
-References: 
+References:
 https://huggingface.co/docs/transformers/main/en/tasks/image_classification
 https://github.com/huggingface/transformers/tree/main/examples/pytorch/image-classification
 
